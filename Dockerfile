@@ -13,9 +13,11 @@ RUN apk add --no-cache git
 # Clonando o repositório e compilando
 WORKDIR /app
 RUN git clone https://github.com/MSJantana/zabbix-exporter-3000 .
-WORKDIR /app/zabbix
 
+# Rodando tidy para baixar dependências
 RUN go mod tidy
+
+# Build do binário
 RUN go build -o /go/bin/ze3000 main.go
 
 # Imagem final
