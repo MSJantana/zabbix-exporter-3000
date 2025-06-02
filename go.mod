@@ -4,8 +4,7 @@ go 1.20
 
 require (
 	github.com/cavaliercoder/go-zabbix v0.0.0-20220606012333-8601f92dd2eb
-	github.com/iris-contrib/middleware/prometheus v0.0.0-20220605200020-e50b808c7502
-	github.com/k0kubun/colorstring v1.1.5 // indirect (atualizado)
+	github.com/iris-contrib/middleware/prometheus v0.0.0-20220605200020-e50b808c7502	
 	github.com/kataras/iris/v12 v12.3.0
 	github.com/klauspost/compress v1.18.3 // indirect (atualizado)
 	github.com/prometheus/client_golang v1.16.0
