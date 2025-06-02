@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"github.com/prometheus/client_golang/prometheus"
 	cnf "github.com/MSJantana/zabbix-exporter-3000/config"
 	zbx "github.com/MSJantana/zabbix-exporter-3000/zabbix"
@@ -12,39 +14,17 @@ import (
 	"time"
 )
 
-var sourceRefreshSec, _ = strconv.Atoi(cnf.SourceRefresh)
-var labelsSliceRaw = strings.Split(cnf.MetricLabels, ",")
+var reg = regexp.MustCompile("[^a-zA-Z0-9]+")
 
-// labels in prom format
-var labelsSlicePrometheus []string
-
-// labels with path "a>b"
-var labelsSliceComplex []string
-
-// labels average
-var labelsSliceAvg []string
-var rawMetricNames []string
-var uniqMetricNames []string
-var rawMetricDesc []string
-var uniqMetricDesc []string
-var itemsMetric *prometheus.GaugeVec
-var metricsMap = make(map[string]*prometheus.GaugeVec, 1000)
-
-//helpers
 func cleanUpName(name string) string {
-	reg, err := regexp.Compile("[^a-zA-Z0-9]+")
-	if err != nil {
-		log.Fatal(err)
-	}
-	cleanName := reg.ReplaceAllString(strings.ToLower(name), "")
-	return cleanName
+	return reg.ReplaceAllString(strings.ToLower(name), "")
 }
 
 func uniqueSlice(intSlice []string) []string {
 	keys := make(map[string]bool)
 	list := []string{}
 	for _, entry := range intSlice {
-		if _, value := keys[entry]; !value {
+		if !keys[entry] {
 			keys[entry] = true
 			list = append(list, entry)
 		}
@@ -52,156 +32,212 @@ func uniqueSlice(intSlice []string) []string {
 	return list
 }
 
-func registerMetric(metric *prometheus.GaugeVec) {
+func registerMetric(metric *prometheus.GaugeVec) error {
 	if cnf.StrictRegister {
-		prometheus.MustRegister(metric)
-	} else {
-		prometheus.Register(metric)
+		return prometheus.Register(metric)
 	}
+	// Use MustRegister, que pode panic, só se for StrictRegister=true
+	prometheus.MustRegister(metric)
+	return nil
 }
 
-func buildMetrics() {
-	for _, vl := range labelsSliceRaw {
+type ZabbixResponse struct {
+	Result []map[string]interface{} `json:"result"`
+}
+
+func queryZabbix() ([]map[string]interface{}, error) {
+	items, err := zbx.Session.Do(zbx.Query)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp ZabbixResponse
+	err = json.Unmarshal(items.Body, &resp)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(resp.Result) == 0 {
+		return nil, errors.New("empty response from Zabbix; check ZE3000_ZABBIX_QUERY")
+	}
+
+	return resp.Result, nil
+}
+
+func parseLabels(rawLabels []string) (promLabels, complexLabels, avgLabels []string) {
+	for _, vl := range rawLabels {
 		if strings.Contains(vl, ">") {
-			labelsSlicePrometheus = append(labelsSlicePrometheus, strings.Replace(vl, ">", "_", -1))
-			labelsSliceComplex = append(labelsSliceComplex, vl)
+			promLabels = append(promLabels, strings.ReplaceAll(vl, ">", "_"))
+			complexLabels = append(complexLabels, vl)
 		} else {
-			labelsSlicePrometheus = append(labelsSlicePrometheus, vl)
-			labelsSliceAvg = append(labelsSliceAvg, vl)
+			promLabels = append(promLabels, vl)
+			avgLabels = append(avgLabels, vl)
 		}
 	}
+	return
+}
 
-	log.Print("Labels that will be produced      :", labelsSlicePrometheus)
-	log.Print("Complex labels that will be parsed:", labelsSliceComplex)
-	log.Print("Plain labels that will be parsed  :", labelsSliceAvg)
+func extractMetricNamesAndDesc(results []map[string]interface{}) (names, desc []string) {
+	for k, result := range results {
+		if nameRaw, ok := result[cnf.MetricNameField]; ok {
+			name, ok2 := nameRaw.(string)
+			if !ok2 {
+				name = "invalid_name"
+			}
+			cleanName := cleanUpName(name)
+			names = append(names, cleanName)
+		}
 
-	var results = queryZabbix()
-
-	if cnf.MetricNameField != "" {
-		for k, result := range results {
-			cleanName := cleanUpName(result[cnf.MetricNameField].(string))
-			rawMetricNames = append(rawMetricNames, cleanName)
-			if result[cnf.MetricHelpField] != nil {
-				if result[cnf.MetricHelpField].(string) != "" {
-					rawMetricDesc = append(rawMetricDesc, result[cnf.MetricHelpField].(string))
-				} else {
-					rawMetricDesc = append(rawMetricDesc, "NA_"+strconv.Itoa(k))
-				}
+		if helpRaw, ok := result[cnf.MetricHelpField]; ok {
+			help, ok2 := helpRaw.(string)
+			if ok2 && help != "" {
+				desc = append(desc, help)
 			} else {
-				rawMetricDesc = append(rawMetricDesc, "NA")
+				desc = append(desc, "NA_"+strconv.Itoa(k))
 			}
+		} else {
+			desc = append(desc, "NA_"+strconv.Itoa(k))
 		}
 	}
+	return
+}
 
-	log.Println("Raw Metrics    : ", rawMetricNames)
-	log.Println("Raw Description: ", rawMetricDesc)
-	uniqMetricNames := uniqueSlice(rawMetricNames)
-	uniqMetricDesc := uniqueSlice(rawMetricDesc)
+func createMetrics(names, desc, promLabels []string) (map[string]*prometheus.GaugeVec, *prometheus.GaugeVec, error) {
+	metricsMap := make(map[string]*prometheus.GaugeVec)
+	var singleMetric *prometheus.GaugeVec
 
-	log.Println("Uniq Metrics    : ", uniqMetricNames)
-	log.Println("Uniq Description: ", uniqMetricDesc)
+	uniqNames := uniqueSlice(names)
+	uniqDesc := uniqueSlice(desc)
 
-	if len(uniqMetricNames) != len(uniqMetricDesc) {
-		log.Print("WARNING: Number of Metrics and Description not equal")
+	if len(uniqNames) != len(uniqDesc) {
+		log.Printf("WARNING: Number of metrics and description not equal")
 
-		if len(uniqMetricNames) < len(uniqMetricDesc) {
-			log.Fatal("ERROR: Insufficient uniq Metrics. Try to use more unique ZE3000_METRIC_NAME_FIELD, or use ZE3000_SINGLE_METRIC_NAME=true")
-		} else {
-			log.Print("WARNING: I try to heal this by populating NA")
-			for k, _ := range uniqMetricNames {
-				uniqMetricDesc = append(uniqMetricDesc, "NA_"+strconv.Itoa(k))
-			}
+		if len(uniqNames) < len(uniqDesc) {
+			return nil, nil, errors.New("insufficient unique metrics; use more unique ZE3000_METRIC_NAME_FIELD or ZE3000_SINGLE_METRIC_NAME=true")
+		}
+
+		// "Heal" by padding descriptions
+		for i := len(uniqDesc); i < len(uniqNames); i++ {
+			uniqDesc = append(uniqDesc, "NA_"+strconv.Itoa(i))
 		}
 	}
 
 	if cnf.SingleMetric {
 		fullName := cnf.MetricNamePrefix
-
-		itemsMetric = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		singleMetric = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: cnf.MetricNamespace,
 			Subsystem: cnf.MetricSubsystem,
 			Name:      fullName,
 			Help:      cnf.SingleMetricHelp,
-		}, labelsSlicePrometheus)
+		}, promLabels)
 
-		registerMetric(itemsMetric)
+		err := registerMetric(singleMetric)
+		if err != nil {
+			return nil, nil, err
+		}
+
 	} else {
-		for k, name := range uniqMetricNames {
-			//clean up metric name
+		for i, name := range uniqNames {
 			fullName := cnf.MetricNamePrefix
 			if cnf.MetricNameField != "" {
-				fullName = cnf.MetricNamePrefix + "_" + name
+				fullName = fullName + "_" + name
 			}
 
-			itemsMetric = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			gauge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 				Namespace: cnf.MetricNamespace,
 				Subsystem: cnf.MetricSubsystem,
 				Name:      fullName,
-				Help:      uniqMetricDesc[k],
-			}, labelsSlicePrometheus)
+				Help:      uniqDesc[i],
+			}, promLabels)
 
-			metricsMap[name] = itemsMetric
+			metricsMap[name] = gauge
 		}
 
 		for _, metric := range metricsMap {
-			registerMetric(metric)
+			err := registerMetric(metric)
+			if err != nil {
+				return nil, nil, err
+			}
 		}
 	}
 
-	log.Print("Number of bject getting from Zabbix    : ", len(results))
-	if cnf.SingleMetric {
-		log.Print("Number of metrics that will be produced: ", 1)
-	} else {
-		log.Print("Number of metrics that will be produced: ", len(metricsMap))
-	}
+	return metricsMap, singleMetric, nil
 }
 
-func queryZabbix() []map[string]interface{} {
-	items, err := zbx.Session.Do(zbx.Query)
+// RecordMetricsWithContext roda a coleta de métricas, pode ser cancelado pelo context
+func RecordMetricsWithContext(ctx context.Context) error {
+	rawLabels := strings.Split(cnf.MetricLabels, ",")
+	promLabels, complexLabels, avgLabels := parseLabels(rawLabels)
+
+	log.Print("Labels that will be produced      :", promLabels)
+	log.Print("Complex labels that will be parsed:", complexLabels)
+	log.Print("Plain labels that will be parsed  :", avgLabels)
+
+	results, err := queryZabbix()
 	if err != nil {
-		log.Fatal("ERROR While Do request: ", err)
+		return err
 	}
 
-	var results []map[string]interface{}
-	json.Unmarshal(items.Body, &results)
-	if len(results) == 0 {
-		log.Fatal("Empty response from Zabbix. Check query at ZE3000_ZABBIX_QUERY")
-	}
-	return results
-}
+	names, desc := extractMetricNamesAndDesc(results)
 
-func RecordMetrics() {
-	buildMetrics()
+	metricsMap, singleMetric, err := createMetrics(names, desc, promLabels)
+	if err != nil {
+		return err
+	}
+
+	refreshSec, err := strconv.Atoi(cnf.SourceRefresh)
+	if err != nil {
+		refreshSec = 60
+	}
+
 	go func() {
+		ticker := time.NewTicker(time.Duration(refreshSec) * time.Second)
+		defer ticker.Stop()
+
 		for {
-			var results = queryZabbix()
-			for _, result := range results {
+			select {
+			case <-ctx.Done():
+				log.Print("Metrics collection stopped by context cancellation")
+				return
+			case <-ticker.C:
+				results, err := queryZabbix()
+				if err != nil {
+					log.Printf("Error querying Zabbix: %v", err)
+					continue
+				}
 
-				labelsWithValues := make(map[string]string)
+				for _, result := range results {
+					labelsWithValues := make(map[string]string)
 
-				if len(labelsSliceAvg) > 0 {
-					for _, vAvg := range labelsSliceAvg {
-						if result[vAvg] != nil {
-							labelsWithValues[vAvg] = result[vAvg].(string)
+					for _, vAvg := range avgLabels {
+						if val, ok := result[vAvg]; ok {
+							if sval, ok2 := val.(string); ok2 {
+								labelsWithValues[vAvg] = sval
+							} else {
+								labelsWithValues[vAvg] = "NA"
+							}
 						} else {
 							labelsWithValues[vAvg] = "NA"
 						}
 					}
-				}
 
-				if len(labelsSliceComplex) > 0 {
-					for _, vCplx := range labelsSliceComplex {
+					for _, vCplx := range complexLabels {
+						promLabel := strings.ReplaceAll(vCplx, ">", "_")
+						path := strings.Split(vCplx, ">")
 
-						var promLabel = strings.Replace(vCplx, ">", "_", -1)
-						var path = strings.Split(vCplx, ">")
-						if result[path[0]] != nil {
-							if len(result[path[0]].([]interface{})) > 0 {
-								for _, cplx := range result[path[0]].([]interface{}) {
-									subCplx := cplx.(map[string]interface{})
-									if subCplx[path[1]] != nil {
-										labelsWithValues[promLabel] = subCplx[path[1]].(string)
-									} else {
-										labelsWithValues[promLabel] = "NA"
+						if val, ok := result[path[0]]; ok {
+							if slice, ok := val.([]interface{}); ok && len(slice) > 0 {
+								for _, cplx := range slice {
+									if subMap, ok := cplx.(map[string]interface{}); ok {
+										if subVal, ok := subMap[path[1]]; ok {
+											if s, ok := subVal.(string); ok {
+												labelsWithValues[promLabel] = s
+											} else {
+												labelsWithValues[promLabel] = "NA"
+											}
+										} else {
+											labelsWithValues[promLabel] = "NA"
+										}
 									}
 								}
 							} else {
@@ -211,23 +247,30 @@ func RecordMetrics() {
 							labelsWithValues[promLabel] = "NA"
 						}
 					}
-				}
 
-				var f float64
-				f = float64(0)
-				if result[cnf.MetricValue] != nil {
-					f, _ = strconv.ParseFloat(result[cnf.MetricValue].(string), 64)
-				}
+					var f float64
+					if val, ok := result[cnf.MetricValue]; ok {
+						if sval, ok2 := val.(string); ok2 {
+							f, _ = strconv.ParseFloat(sval, 64)
+						}
+					}
 
-				if cnf.SingleMetric {
-					itemsMetric.With(labelsWithValues).Set(f)
-				} else {
-					cleanName := cleanUpName(result[cnf.MetricNameField].(string))
-					metricsMap[cleanName].With(labelsWithValues).Set(f)
+					if cnf.SingleMetric {
+						singleMetric.With(labelsWithValues).Set(f)
+					} else {
+						if nameRaw, ok := result[cnf.MetricNameField]; ok {
+							if nameStr, ok2 := nameRaw.(string); ok2 {
+								cleanName := cleanUpName(nameStr)
+								if metricVec, ok := metricsMap[cleanName]; ok {
+									metricVec.With(labelsWithValues).Set(f)
+								}
+							}
+						}
+					}
 				}
 			}
-
-			time.Sleep(time.Duration(sourceRefreshSec) * time.Second)
 		}
 	}()
+
+	return nil
 }
