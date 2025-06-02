@@ -9,7 +9,7 @@ ENV GOPROXY https://proxy.golang.org
 
 RUN  \
      apk add --no-cache git && \
-     git clone https://github.com/rzrbld/zabbix-exporter-3000 && cd zabbix-exporter-3000 && go build main.go && cp main /go/bin/ze3000
+     git clone https://github.com/MSJantana/zabbix-exporter-3000 && cd zabbix-exporter-3000 && go build main.go && cp main /go/bin/ze3000
 
 FROM alpine:3.11
 
