@@ -1,4 +1,5 @@
-module github.com/rzrbld/zabbix-exporter-3000
+module github.com/MSJantana/zabbix-exporter-3000
+
 
 go 1.14
 
