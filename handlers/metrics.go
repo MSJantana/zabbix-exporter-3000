@@ -3,8 +3,8 @@ package handlers
 import (
 	"encoding/json"
 	"github.com/prometheus/client_golang/prometheus"
-	cnf "github.com/rzrbld/zabbix-exporter-3000/config"
-	zbx "github.com/rzrbld/zabbix-exporter-3000/zabbix"
+	cnf "github.com/MSJantana/zabbix-exporter-3000/config"
+	zbx "github.com/MSJantana/zabbix-exporter-3000/zabbix"
 	"log"
 	"regexp"
 	"strconv"
