@@ -1,70 +1,69 @@
 package zabbix
 
 import (
-	"bytes"
 	"crypto/tls"
 	"encoding/json"
-	"github.com/rzrbld/zabbix-exporter-3000/config"
-	"io/ioutil"
+	"github.com/cavaliercoder/go-zabbix"
+	cnf "github.com/MSJantana/zabbix-exporter-3000/config"
 	"log"
 	"net/http"
 	"strings"
 )
 
-var AuthToken string
-var Query map[string]interface{}
+var Session, err = Connect()
+var Query *zabbix.Request
 
-func Connect() (*http.Client, error) {
+func Connect() (*zabbix.Session, error) {
 	client := &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: config.SslSkip,
+				InsecureSkipVerify: cnf.SslSkip,
 			},
 		},
 	}
 
-	// Login com username (compatível com Zabbix 6.0/7.0)
+	cache := zabbix.NewSessionFileCache().SetFilePath("./zabbix_session")
+
+	session := zabbix.CreateClient(cnf.Server).
+		WithCache(cache).
+		WithHTTPClient(client)
+
+	// Corrige payload para Zabbix 7+
 	payload := map[string]interface{}{
 		"jsonrpc": "2.0",
 		"method":  "user.login",
-		"params": map[string]string{
-			"username": config.User,   // ← CORRETO!
-			"password": config.Password,
+		"params": map[string]interface{}{
+			"username": cnf.User,
+			"password": cnf.Password,
 		},
 		"id":   1,
 		"auth": nil,
 	}
 
-	body, _ := json.Marshal(payload)
-
-	resp, err := client.Post(config.Server, "application/json", bytes.NewReader(body))
+	resp, err := session.CallRaw(payload)
 	if err != nil {
-		log.Fatalf("Erro ao fazer login no Zabbix: %v", err)
-	}
-	defer resp.Body.Close()
-
-	data, _ := ioutil.ReadAll(resp.Body)
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(data, &result); err != nil {
-		log.Fatalf("Erro ao parsear resposta JSON: %v", err)
+		log.Fatalf("Erro ao autenticar no Zabbix: %v", err)
 	}
 
-	token, ok := result["result"].(string)
+	authToken, ok := resp.Result.(string)
 	if !ok {
-		log.Fatalf("Falha ao obter token de autenticação: %s", data)
+		log.Fatalf("Erro ao extrair o token de autenticação: %v", resp)
 	}
 
-	AuthToken = token
-	log.Printf("Token de autenticação recebido com sucesso.")
+	session.SetAuthToken(authToken)
 
-	// Substitui %auth-token% na query configurada
-	strRequestWithAuth := strings.Replace(config.Query, "%auth-token%", token, -1)
-
-	// Transforma query para o formato JSON
-	if err := json.Unmarshal([]byte(strRequestWithAuth), &Query); err != nil {
-		log.Print("Erro ao converter Query para JSON: ", err)
+	version, err := session.GetVersion()
+	if err != nil {
+		log.Fatalf("Erro ao obter a versão do Zabbix: %v", err)
 	}
 
-	return client, nil
+	strRequestWithAuth := strings.Replace(cnf.Query, "%auth-token%", authToken, -1)
+
+	err = json.Unmarshal([]byte(strRequestWithAuth), &Query)
+	if err != nil {
+		log.Printf("Erro ao converter JSON da query: %v", err)
+	}
+
+	log.Printf("Conectado ao Zabbix API v%s", version)
+	return session, nil
 }
