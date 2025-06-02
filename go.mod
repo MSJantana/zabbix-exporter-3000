@@ -1,6 +1,6 @@
 module github.com/MSJantana/zabbix-exporter-3000
 
-go 1.21
+go 1.20
 
 require (
 	github.com/cavaliercoder/go-zabbix v0.0.0-20220606012333-8601f92dd2eb
