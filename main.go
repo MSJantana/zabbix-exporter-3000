@@ -9,8 +9,8 @@ import (
 	"github.com/kataras/iris/v12/middleware/recover"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	cnf "github.com/rzrbld/zabbix-exporter-3000/config"
-	hdl "github.com/rzrbld/zabbix-exporter-3000/handlers"
+	cnf "github.com/MSJantana/zabbix-exporter-3000/config"
+	hdl "github.com/MSJantana/zabbix-exporter-3000/handlers"
 )
 
 func main() {
@@ -20,7 +20,7 @@ func main() {
 	fmt.Println("version  : 0.5")
 	fmt.Println("Author   : rzrbld")
 	fmt.Println("License  : MIT")
-	fmt.Println("Git-repo : https://github.com/rzrbld/zabbix-exporter-3000 \033[m \r\n")
+	fmt.Println("Git-repo : https://github.com/MSJantana/zabbix-exporter-3000 \033[m \r\n")
 
 	app := iris.New()
 
