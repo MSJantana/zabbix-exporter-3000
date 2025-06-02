@@ -1,5 +1,5 @@
 # Etapa de build
-FROM golang:1.14-alpine as builder
+FROM golang:1.20-alpine as builder
 
 LABEL maintainer="rzrbld <razblade@gmail.com>"
 
@@ -7,20 +7,14 @@ ENV CGO_ENABLED=0 \
     GO111MODULE=on \
     GOPROXY=https://proxy.golang.org
 
-# Instalando dependências
 RUN apk add --no-cache git
 
-# Clonando o repositório e compilando
 WORKDIR /app
 RUN git clone https://github.com/MSJantana/zabbix-exporter-3000 .
 
-# Rodando tidy para baixar dependências
 RUN go mod tidy
-
-# Build do binário
 RUN go build -o /go/bin/ze3000 main.go
 
-# Imagem final
 FROM alpine:3.11
 
 EXPOSE 9469
